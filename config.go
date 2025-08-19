@@ -9,26 +9,22 @@ import (
 
 // Config represents the application configuration
 type Config struct {
-	TotalRequests int           `json:"totalRequests"`
-	PostRatio     float64       `json:"postRatio"`
-	BaseURL       string        `json:"baseURL"`
-	WorkerNumber  int           `json:"workerNumber"`
-	Timeout       time.Duration `json:"timeout"`
+	Duration  time.Duration `json:"duration"` // Duration to run the benchmark
+	PostRatio float64       `json:"postRatio"`
+	BaseURL   string        `json:"baseURL"`
+	Timeout   time.Duration `json:"timeout"`
 }
 
 // Validate checks if the configuration values are within acceptable ranges
 func (c *Config) Validate() error {
-	if c.TotalRequests <= 0 {
-		return fmt.Errorf("totalRequests must be greater than 0")
+	if c.Duration <= 0 {
+		return fmt.Errorf("duration must be greater than 0")
 	}
 	if c.PostRatio < 0 || c.PostRatio > 1 {
 		return fmt.Errorf("postRatio must be between 0 and 1")
 	}
 	if c.BaseURL == "" {
 		return fmt.Errorf("baseURL cannot be empty")
-	}
-	if c.WorkerNumber <= 0 {
-		return fmt.Errorf("workerNumber must be greater than 0")
 	}
 	if c.Timeout <= 0 {
 		return fmt.Errorf("timeout must be greater than 0")
@@ -61,10 +57,9 @@ func LoadConfig(path string) (*Config, error) {
 // NewDefaultConfig creates a new Config with default values
 func NewDefaultConfig() *Config {
 	return &Config{
-		TotalRequests: 100,
-		PostRatio:     0.7,
-		BaseURL:       "http://localhost:8080",
-		WorkerNumber:  10,
-		Timeout:       5 * time.Second,
+		Duration:  30 * time.Second,
+		PostRatio: 0.7,
+		BaseURL:   "http://localhost:8080",
+		Timeout:   5 * time.Second,
 	}
 }

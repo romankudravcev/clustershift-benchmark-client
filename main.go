@@ -10,33 +10,31 @@ import (
 	"time"
 )
 
-var shutdown = make(chan struct{})
-
-type RequestType struct {
-	Type     string // "POST" or "GET"
-	JobIndex int
-}
+const requestInterval = 100 * time.Millisecond
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
+	// Use the new rand.New approach instead of deprecated rand.Seed
+	source := rand.NewSource(time.Now().UnixNano())
+	rng := rand.New(source)
 
 	config, err := LoadConfig("config.json")
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	// Convert duration from seconds to Duration
+	config.Duration = time.Duration(config.Duration) * time.Second
+
 	stats := &RequestStats{
-		Results: make([]RequestResult, 0, config.TotalRequests),
+		Results: make([]RequestResult, 0),
 	}
 
 	fmt.Printf("Starting test at: %s\n", time.Now().UTC().Format(time.RFC3339))
 	fmt.Printf("Configuration:\n")
-	fmt.Printf("Total requests: %d\n", config.TotalRequests)
+	fmt.Printf("Duration: %v\n", config.Duration)
 	fmt.Printf("POST ratio: %.2f\n", config.PostRatio)
 	fmt.Printf("Base URL: %s\n", config.BaseURL)
-	fmt.Printf("Concurrency: %d\n", config.WorkerNumber)
-	fmt.Printf("Timeout: %s\n", config.Timeout)
-	fmt.Println("Press Enter to stop the test...")
+	fmt.Printf("Request interval: %v\n", requestInterval)
 
 	transport := &http.Transport{
 		MaxIdleConns:        100,
@@ -44,119 +42,80 @@ func main() {
 		IdleConnTimeout:     90 * time.Second,
 		DisableKeepAlives:   false,
 		DialContext: (&net.Dialer{
-			Timeout:   2 * time.Second,
+			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		TLSHandshakeTimeout:   2 * time.Second,
-		ResponseHeaderTimeout: 2 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
 	}
 
 	client := &http.Client{
-		Timeout:   3 * time.Second,
+		Timeout:   10 * time.Second,
 		Transport: transport,
 	}
 
-	jobs := make(chan RequestType, config.TotalRequests)
-	var activeWorkers sync.WaitGroup
+	// Start the request sender goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go requestSender(config, stats, client, rng, &wg)
 
-	go func() {
-		var input string
-		fmt.Scanln(&input)
-		close(shutdown)
-	}()
+	// Wait for the goroutine to finish
+	wg.Wait()
 
-	// Start worker pool
-	for w := 1; w <= config.WorkerNumber; w++ {
-		activeWorkers.Add(1)
-		go worker(jobs, stats, config.BaseURL, client, &activeWorkers)
-	}
-
-	// Create batches of requests
-	jobCount := 0
-	batchSize := 10
-outer:
-	for jobCount < config.TotalRequests {
-		// Create a batch of requests
-		batch := createBatch(batchSize, config.PostRatio)
-
-		// Send the batch
-		for _, requestType := range batch {
-			select {
-			case <-shutdown:
-				break outer
-			default:
-				stats.wg.Add(1)
-				jobs <- RequestType{Type: requestType, JobIndex: jobCount}
-				jobCount++
-
-				if jobCount >= config.TotalRequests {
-					break
-				}
-			}
-		}
-	}
-	close(jobs)
-
-	activeWorkers.Wait()
-	stats.wg.Wait()
-
-	fmt.Printf("\nTest stopped after %d requests\n", jobCount)
+	fmt.Printf("\nTest completed after %v\n", config.Duration)
+	fmt.Printf("Total requests sent: %d\n", len(stats.Results))
 
 	printResults(stats)
 	verifyResults(config.BaseURL, stats, client)
 	saveResults(stats)
 }
 
-// createBatch creates a slice of request types based on the POST ratio
-func createBatch(size int, postRatio float64) []string {
-	batch := make([]string, size)
-	postsInBatch := int(float64(size) * postRatio)
+// requestSender sends requests every 100ms for the specified duration
+func requestSender(config *Config, stats *RequestStats, client *http.Client, rng *rand.Rand, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-	// Fill the batch with POST requests first
-	for i := 0; i < postsInBatch; i++ {
-		batch[i] = "POST"
-	}
-
-	// Fill the remaining slots with GET requests
-	for i := postsInBatch; i < size; i++ {
-		batch[i] = "GET"
-	}
-
-	// Shuffle the batch
-	rand.Shuffle(len(batch), func(i, j int) {
-		batch[i], batch[j] = batch[j], batch[i]
-	})
-
-	return batch
-}
-
-func worker(jobs <-chan RequestType, stats *RequestStats, baseURL string, client *http.Client, activeWorkers *sync.WaitGroup) {
-	defer activeWorkers.Done()
-
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(requestInterval)
 	defer ticker.Stop()
 
-	for job := range jobs {
-		select {
-		case <-shutdown:
-			stats.wg.Done()
-			continue
-		default:
-			var err error
-			if job.Type == "POST" {
-				baseURL, err = makePostRequest(baseURL, stats, client)
-			} else {
-				baseURL, err = makeGetRequest(baseURL, stats, client)
-			}
-			if err != nil {
-				log.Printf("Error making request: %v", err)
-			}
-			stats.wg.Done()
+	timeout := time.After(config.Duration)
+	baseURL := config.BaseURL
+	requestCount := 0
 
-			// Wait for next tick to maintain 100ms interval
-			<-ticker.C
+	var reqWG sync.WaitGroup
+
+loop:
+	for {
+		select {
+		case <-timeout:
+			fmt.Printf("\nBenchmark duration completed. Stopping...\n")
+			break loop
+		case <-ticker.C:
+			var requestType string
+			if rng.Float64() < config.PostRatio {
+				requestType = "POST"
+			} else {
+				requestType = "GET"
+			}
+
+			reqWG.Add(1)
+			go func(reqType string, reqCount int, currentBaseURL string) {
+				defer reqWG.Done()
+				var err error
+				if reqType == "POST" {
+					_, err = makePostRequest(currentBaseURL, stats, client)
+				} else {
+					_, err = makeGetRequest(currentBaseURL, stats, client)
+				}
+				if err != nil {
+					log.Printf("Error making %s request #%d: %v", reqType, reqCount, err)
+				}
+			}(requestType, requestCount, baseURL)
+
+			requestCount++
 		}
 	}
+
+	reqWG.Wait()
 }
 
 func cleanupClient(client *http.Client) {

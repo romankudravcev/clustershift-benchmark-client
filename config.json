@@ -1,7 +1,6 @@
 {
-  "totalRequests": 4500,
+  "duration": 600,
   "postRatio": 0.7,
-  "baseURL": "141.13.5.206",
-  "workerNumber": 1,
+  "baseURL": "141.13.5.240",
   "timeout": 5
 }
